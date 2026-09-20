@@ -1,1 +1,1065 @@
+# ============================================================
+#   NAK NEVER DIE - Admin Panel v6.3
+#   Search + Renew + Device Info
+#   Run:  python admin_panel.py
+#   Open: http://127.0.0.1:5000/admin
+#   Login: admin / NAKadmin2026
+# ============================================================
 
+from flask import (Flask, request, jsonify, session,
+                   redirect, url_for, render_template_string)
+import datetime
+import json
+import os
+
+app = Flask(__name__)
+app.secret_key = "NAK_SECRET_KEY_CHANGE_ME_2026"
+
+ADMIN_USER = "admin"
+ADMIN_PASS = "NAKadmin2026"
+DB_FILE    = "licenses.json"
+
+
+def _dt(y, m, d, h=23, mi=0):
+    return datetime.datetime(y, m, d, h, mi, 0)
+
+
+def now():
+    return datetime.datetime.now()
+
+
+def load_db():
+    if not os.path.isfile(DB_FILE):
+        seed = {
+            "NAK2026VIP": {
+                "expiry": _dt(2027, 6, 15, 18).isoformat(),
+                "hwid": None,
+                "note": "VIP master key",
+                "device": None,
+                "os": None,
+                "ver": None,
+                "last_login": None,
+                "login_count": 0,
+                "history": [],
+            }
+        }
+        save_db(seed)
+        return seed
+    try:
+        with open(DB_FILE, "r") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def save_db(data):
+    with open(DB_FILE, "w") as f:
+        json.dump(data, f, indent=2)
+
+
+@app.route("/", methods=["GET"])
+def home():
+    return jsonify({
+        "service": "NAK NEVER DIE License Server",
+        "status": "online",
+        "time": now().isoformat(),
+        "panel": "/admin",
+    })
+
+
+@app.route("/check", methods=["GET", "POST"])
+def check():
+    data = request.args if request.method == "GET" else request.form
+    key      = (data.get("key") or "").strip()
+    hwid     = (data.get("hwid") or "").strip() or None
+    device   = (data.get("device") or "").strip() or "Unknown"
+    os_info  = (data.get("os") or "").strip() or "Unknown"
+    ver      = (data.get("ver") or "").strip() or ""
+
+    if not key:
+        return jsonify({"ok": False, "reason": "missing_key"}), 400
+
+    db = load_db()
+    lic = db.get(key)
+    if not lic:
+        return jsonify({"ok": False, "reason": "invalid_key"}), 401
+
+    try:
+        expiry = datetime.datetime.fromisoformat(lic["expiry"])
+    except Exception:
+        return jsonify({"ok": False, "reason": "bad_license"}), 500
+
+    if now() > expiry:
+        return jsonify({
+            "ok": False,
+            "reason": "expired",
+            "expiry": expiry.isoformat(),
+        }), 403
+
+    if hwid:
+        if lic.get("hwid") is None:
+            lic["hwid"] = hwid
+        elif lic["hwid"] != hwid:
+            return jsonify({
+                "ok": False,
+                "reason": "hwid_mismatch",
+                "bound_hwid": lic["hwid"],
+            }), 403
+
+    ts = now().isoformat()
+    lic["device"] = device
+    lic["os"] = os_info
+    lic["ver"] = ver
+    lic["last_login"] = ts
+    lic["login_count"] = int(lic.get("login_count", 0)) + 1
+
+    history = lic.get("history", [])
+    history.insert(0, {
+        "time": ts,
+        "device": device,
+        "os": os_info,
+        "hwid": hwid or "?",
+        "ip": request.remote_addr or "?",
+    })
+    lic["history"] = history[:20]
+
+    db[key] = lic
+    save_db(db)
+
+    return jsonify({
+        "ok": True,
+        "key": key,
+        "hwid": hwid,
+        "expiry": expiry.isoformat(),
+        "server_time": ts,
+        "note": lic.get("note", ""),
+    })
+
+
+def is_logged_in():
+    return session.get("admin") is True
+
+
+def require_login():
+    if not is_logged_in():
+        return redirect(url_for("admin_login"))
+    return None
+
+
+@app.route("/admin/login", methods=["GET", "POST"])
+def admin_login():
+    error = None
+    if request.method == "POST":
+        u = request.form.get("user", "")
+        p = request.form.get("pass", "")
+        if u == ADMIN_USER and p == ADMIN_PASS:
+            session["admin"] = True
+            return redirect(url_for("admin_panel"))
+        error = "Invalid credentials"
+    return render_template_string(LOGIN_HTML, error=error)
+
+
+@app.route("/admin/logout")
+def admin_logout():
+    session.clear()
+    return redirect(url_for("admin_login"))
+
+
+@app.route("/admin")
+def admin_panel():
+    redir = require_login()
+    if redir:
+        return redir
+    return render_template_string(PANEL_HTML, now=now().isoformat())
+
+
+@app.route("/admin/api/list")
+def api_list():
+    if not is_logged_in():
+        return jsonify({"ok": False, "reason": "auth"}), 401
+    return jsonify({"ok": True, "data": load_db()})
+
+
+@app.route("/admin/api/create", methods=["POST"])
+def api_create():
+    if not is_logged_in():
+        return jsonify({"ok": False, "reason": "auth"}), 401
+
+    d = request.form
+    key = (d.get("key") or "").strip()
+    if not key:
+        return jsonify({"ok": False, "reason": "missing_key"}), 400
+
+    db = load_db()
+    if key in db:
+        return jsonify({"ok": False, "reason": "key_exists"}), 409
+
+    try:
+        expiry = _dt(
+            int(d.get("year", 2027)),
+            int(d.get("month", 12)),
+            int(d.get("day", 31)),
+            int(d.get("hour", 23)),
+            int(d.get("minute", 0)),
+        )
+    except ValueError:
+        return jsonify({"ok": False, "reason": "bad_date"}), 400
+
+    db[key] = {
+        "expiry": expiry.isoformat(),
+        "hwid": None,
+        "note": d.get("note", ""),
+        "device": None,
+        "os": None,
+        "ver": None,
+        "last_login": None,
+        "login_count": 0,
+        "history": [],
+    }
+    save_db(db)
+    return jsonify({"ok": True, "key": key, "expiry": expiry.isoformat()})
+
+
+@app.route("/admin/api/update", methods=["POST"])
+def api_update():
+    if not is_logged_in():
+        return jsonify({"ok": False, "reason": "auth"}), 401
+
+    d = request.form
+    old_key = (d.get("old_key") or "").strip()
+    new_key = (d.get("new_key") or old_key).strip()
+
+    if not old_key:
+        return jsonify({"ok": False, "reason": "missing_key"}), 400
+
+    db = load_db()
+    if old_key not in db:
+        return jsonify({"ok": False, "reason": "not_found"}), 404
+
+    lic = db[old_key]
+
+    if new_key != old_key:
+        if new_key in db:
+            return jsonify({"ok": False, "reason": "key_exists"}), 409
+        del db[old_key]
+
+    try:
+        expiry = _dt(
+            int(d.get("year", 2027)),
+            int(d.get("month", 12)),
+            int(d.get("day", 31)),
+            int(d.get("hour", 23)),
+            int(d.get("minute", 0)),
+        )
+        lic["expiry"] = expiry.isoformat()
+    except ValueError:
+        return jsonify({"ok": False, "reason": "bad_date"}), 400
+
+    if "note" in d and d.get("note"):
+        lic["note"] = d.get("note")
+    if d.get("reset_hwid") == "1":
+        lic["hwid"] = None
+        lic["device"] = None
+        lic["os"] = None
+        lic["ver"] = None
+        lic["history"] = []
+
+    db[new_key] = lic
+    save_db(db)
+    return jsonify({"ok": True, "key": new_key, "expiry": lic["expiry"]})
+
+
+@app.route("/admin/api/renew", methods=["POST"])
+def api_renew():
+    """Add days to a key's expiry."""
+    if not is_logged_in():
+        return jsonify({"ok": False, "reason": "auth"}), 401
+
+    key  = (request.form.get("key") or "").strip()
+    days = request.form.get("days", "30")
+    try:
+        days = int(days)
+    except ValueError:
+        return jsonify({"ok": False, "reason": "bad_days"}), 400
+
+    db = load_db()
+    if key not in db:
+        return jsonify({"ok": False, "reason": "not_found"}), 404
+
+    lic = db[key]
+    try:
+        expiry = datetime.datetime.fromisoformat(lic["expiry"])
+    except Exception:
+        return jsonify({"ok": False, "reason": "bad_license"}), 500
+
+    # If already expired, start from now; else extend from current expiry
+    base = max(expiry, now())
+    new_expiry = base + datetime.timedelta(days=days)
+
+    lic["expiry"] = new_expiry.isoformat()
+    db[key] = lic
+    save_db(db)
+
+    return jsonify({
+        "ok": True,
+        "key": key,
+        "expiry": new_expiry.isoformat(),
+        "days_added": days,
+    })
+
+
+@app.route("/admin/api/delete", methods=["POST"])
+def api_delete():
+    if not is_logged_in():
+        return jsonify({"ok": False, "reason": "auth"}), 401
+    key = (request.form.get("key") or "").strip()
+    db = load_db()
+    if key not in db:
+        return jsonify({"ok": False, "reason": "not_found"}), 404
+    del db[key]
+    save_db(db)
+    return jsonify({"ok": True})
+
+
+@app.route("/admin/api/unbind", methods=["POST"])
+def api_unbind():
+    if not is_logged_in():
+        return jsonify({"ok": False, "reason": "auth"}), 401
+    key = (request.form.get("key") or "").strip()
+    db = load_db()
+    if key not in db:
+        return jsonify({"ok": False, "reason": "not_found"}), 404
+    db[key]["hwid"] = None
+    db[key]["device"] = None
+    db[key]["os"] = None
+    db[key]["ver"] = None
+    db[key]["history"] = []
+    save_db(db)
+    return jsonify({"ok": True})
+
+
+# ============================================================
+#   HTML
+# ============================================================
+
+LOGIN_HTML = """
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+<title>NAK Login</title>
+<style>
+  * { box-sizing:border-box; margin:0; padding:0;
+      -webkit-tap-highlight-color:transparent; }
+  body { background:#0a0e14; color:#e6e6e6;
+         font-family:-apple-system,'Segoe UI',Roboto,sans-serif;
+         display:flex; align-items:center; justify-content:center;
+         min-height:100vh; padding:20px; }
+  .phone { width:100%; max-width:380px;
+           background:#111720; border-radius:28px;
+           padding:40px 24px; box-shadow:0 10px 50px #000c; }
+  .logo-icon { width:80px; height:80px; margin:0 auto 16px;
+               background:linear-gradient(135deg,#00ff88,#00aa5c);
+               border-radius:22px; display:flex;
+               align-items:center; justify-content:center;
+               font-size:36px; color:#000; font-weight:900;
+               box-shadow:0 8px 24px #00ff8844; }
+  h1 { color:#fff; font-size:22px; text-align:center;
+       letter-spacing:2px; margin-bottom:6px; }
+  .sub { color:#6a7a8c; font-size:13px; text-align:center;
+         margin-bottom:30px; }
+  label { display:block; color:#8a97a6; font-size:12px;
+          margin:16px 0 8px; letter-spacing:1px; text-transform:uppercase; }
+  input { width:100%; padding:15px 18px;
+          background:#1a2330; border:2px solid #1f2a3a;
+          color:#fff; font-size:15px; border-radius:14px; }
+  input:focus { border-color:#00ff88; outline:none; }
+  button { width:100%; padding:16px; margin-top:24px;
+           background:linear-gradient(135deg,#00ff88,#00cc6a);
+           color:#000; border:none; font-size:16px;
+           font-weight:700; cursor:pointer; border-radius:14px;
+           letter-spacing:1px; box-shadow:0 6px 20px #00ff8855; }
+  button:active { transform:scale(0.97); }
+  .err { color:#ff5555; text-align:center; margin-top:16px; font-size:13px; }
+  .version { text-align:center; color:#3a4552; font-size:11px;
+             margin-top:20px; letter-spacing:1px; }
+</style>
+</head>
+<body>
+<div class="phone">
+  <div class="logo-icon">NAK</div>
+  <h1>ADMIN LOGIN</h1>
+  <div class="sub">NAK NEVER DIE</div>
+  <form method="post">
+    <label>Username</label>
+    <input name="user" placeholder="admin" required>
+    <label>Password</label>
+    <input name="pass" type="password" placeholder="........" required>
+    <button type="submit">SIGN IN</button>
+  </form>
+  {% if error %}<div class="err">{{ error }}</div>{% endif %}
+  <div class="version">v6.3.0</div>
+</div>
+</body>
+</html>
+"""
+
+
+PANEL_HTML = """
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+<title>NAK Admin</title>
+<style>
+  * { box-sizing:border-box; margin:0; padding:0;
+      -webkit-tap-highlight-color:transparent; }
+  body { background:#0a0e14; color:#e6e6e6;
+         font-family:-apple-system,'Segoe UI',Roboto,sans-serif;
+         padding-bottom:100px; }
+
+  .topbar { background:#111720; padding:16px 20px;
+            display:flex; justify-content:space-between;
+            align-items:center; border-bottom:2px solid #00ff8833;
+            position:sticky; top:0; z-index:10; }
+  .topbar h1 { color:#00ff88; font-size:16px;
+               letter-spacing:2px; font-weight:800; }
+  .topbar .time { color:#6a7a8c; font-size:11px; margin-top:2px; }
+  .logout { color:#ff5555; text-decoration:none; font-size:12px;
+            padding:8px 14px; border:1px solid #ff5555;
+            border-radius:10px; font-weight:600; }
+
+  .tabs { display:flex; background:#111720;
+          border-bottom:1px solid #1a2330; position:sticky;
+          top:63px; z-index:9; overflow-x:auto; }
+  .tab { flex:1; min-width:90px; padding:14px 8px;
+         text-align:center; color:#6a7a8c; font-size:11px;
+         font-weight:600; cursor:pointer; letter-spacing:1px;
+         border-bottom:3px solid transparent;
+         text-transform:uppercase; white-space:nowrap; }
+  .tab.active { color:#00ff88; border-bottom-color:#00ff88; }
+
+  .page { display:none; padding:20px; }
+  .page.active { display:block; }
+
+  .card { background:#111720; border-radius:20px;
+          padding:20px; margin-bottom:20px;
+          border:1px solid #1f2a3a; }
+  .card h2 { color:#00ff88; font-size:14px;
+             letter-spacing:1px; margin-bottom:16px; font-weight:700; }
+
+  label { display:block; color:#8a97a6; font-size:11px;
+          margin:14px 0 6px; letter-spacing:1px;
+          text-transform:uppercase; font-weight:600; }
+  input { width:100%; padding:14px 16px;
+          background:#1a2330; border:2px solid #1f2a3a;
+          color:#fff; font-size:14px; border-radius:12px; }
+  input:focus { border-color:#00ff88; outline:none; }
+  .row { display:flex; gap:8px; }
+  .row > * { flex:1; }
+
+  button { width:100%; padding:15px; margin-top:18px;
+           background:linear-gradient(135deg,#00ff88,#00cc6a);
+           color:#000; border:none; font-size:14px;
+           font-weight:700; cursor:pointer; border-radius:12px;
+           letter-spacing:1px; }
+  button:active { transform:scale(0.97); }
+  button.danger { background:linear-gradient(135deg,#ff5555,#cc3333);
+                  color:#fff; }
+  button.renew { background:linear-gradient(135deg,#ffaa00,#cc8800);
+                color:#000; }
+  button.alt { background:#1a2330; color:#00ff88;
+               border:1px solid #00ff8844; }
+
+  /* SEARCH BAR */
+  .search-box { position:relative; margin-bottom:16px; }
+  .search-box input { padding-left:44px; padding-right:44px;
+                      background:#1a2330;
+                      border:2px solid #1f2a3a;
+                      font-size:14px; }
+  .search-box input:focus { border-color:#00ff88;
+                            box-shadow:0 0 0 4px #00ff8822; }
+  .search-icon { position:absolute; left:16px; top:50%;
+                 transform:translateY(-50%);
+                 color:#00ff88; font-size:16px;
+                 pointer-events:none; }
+  .clear-btn { position:absolute; right:12px; top:50%;
+               transform:translateY(-50%);
+               background:#ff555522; color:#ff5555;
+               border:none; width:28px; height:28px;
+               border-radius:50%; cursor:pointer;
+               font-size:14px; display:none;
+               align-items:center; justify-content:center;
+               padding:0; margin:0; }
+  .clear-btn.show { display:flex; }
+  .search-info { color:#6a7a8c; font-size:11px;
+                 margin-bottom:12px; text-align:center; }
+  .search-info b { color:#00ff88; }
+
+  /* KEY CARDS */
+  .key-item { background:#1a2330; border-radius:14px;
+              padding:14px 16px; margin-bottom:12px;
+              border-left:4px solid #00ff88; }
+  .key-item.expired { border-left-color:#ff5555; opacity:0.75; }
+  .key-name { color:#00ff88; font-size:15px;
+              font-weight:700; word-break:break-all;
+              margin-bottom:10px; display:flex;
+              justify-content:space-between;
+              align-items:center;
+              gap:10px; }
+  .key-name .kname { flex:1; }
+  .key-name.expired { color:#ff5555; }
+  .key-meta { color:#8a97a6; font-size:11px;
+              margin-bottom:5px; line-height:1.5; }
+  .key-meta b { color:#c8d4e0; font-weight:500; }
+
+  .device-box { background:#0d131c; border-radius:12px;
+                padding:12px 14px; margin-top:10px;
+                border-left:3px solid #00aaff;
+                box-shadow:inset 0 0 20px #00aaff11; }
+  .device-title { color:#00aaff; font-size:11px;
+                  font-weight:800; letter-spacing:2px;
+                  margin-bottom:8px; text-transform:uppercase;
+                  display:flex; align-items:center; gap:6px; }
+  .device-title .dot { width:8px; height:8px;
+                       background:#00aaff; border-radius:50%;
+                       box-shadow:0 0 8px #00aaff; }
+  .device-line { color:#8a97a6; font-size:12px;
+                 margin-bottom:5px; line-height:1.5;
+                 display:flex; gap:8px; }
+  .device-line .lbl { color:#6a7a8c; min-width:60px;
+                      font-weight:600; font-size:11px;
+                      text-transform:uppercase; }
+  .device-line .val { color:#c8d4e0;
+                      word-break:break-all; flex:1; }
+  .device-line .val.hi { color:#00aaff; font-weight:600; }
+
+  .hist-title { color:#ffaa00; font-size:10px;
+                font-weight:700; letter-spacing:1px;
+                margin:10px 0 6px; text-transform:uppercase; }
+  .hist-item { background:#0d131c; border-radius:8px;
+               padding:8px 10px; margin-bottom:6px;
+               border-left:2px solid #ffaa00;
+               font-size:11px; color:#8a97a6; }
+  .hist-item b { color:#c8d4e0; }
+  .hist-time { color:#ffaa00; font-weight:700;
+               font-size:10px; margin-bottom:3px; }
+
+  .key-actions { display:grid;
+                 grid-template-columns:1fr 1fr;
+                 gap:8px; margin-top:12px; }
+  .key-actions button { padding:10px 8px; font-size:11px;
+                        margin:0; }
+  .key-actions.full button { grid-column: span 2; }
+
+  .renew-row { display:grid;
+               grid-template-columns:repeat(4,1fr);
+               gap:6px; margin-top:8px;
+               padding-top:8px;
+               border-top:1px dashed #2a3a4a; }
+  .renew-row button { padding:8px 4px; font-size:11px;
+                      margin:0; background:#1a2330;
+                      color:#ffaa00;
+                      border:1px solid #ffaa0055;
+                      border-radius:10px; }
+  .renew-row button:hover { background:#ffaa0022; }
+  .renew-row button:active { background:#ffaa0044; }
+  .renew-label { color:#ffaa00; font-size:10px;
+                 font-weight:700; letter-spacing:2px;
+                 text-transform:uppercase;
+                 margin-top:10px;
+                 display:flex; align-items:center;
+                 gap:6px; }
+  .renew-label .icon { font-size:14px; }
+
+  .tag { display:inline-block; padding:4px 10px;
+         border-radius:20px; font-size:10px;
+         font-weight:700; letter-spacing:1px; }
+  .tag.ok { background:#00ff8822; color:#00ff88; }
+  .tag.bad { background:#ff555522; color:#ff5555; }
+  .tag.free { background:#ffaa0022; color:#ffaa00; }
+  .tag.dev { background:#00aaff22; color:#00aaff;
+             margin-left:4px; }
+
+  /* DEVICES PAGE */
+  .device-card { background:#111720; border-radius:18px;
+                 padding:18px; margin-bottom:14px;
+                 border:1px solid #00aaff33;
+                 box-shadow:0 0 20px #00aaff11; }
+  .device-header { display:flex; align-items:center;
+                   gap:12px; margin-bottom:12px; }
+  .device-icon { width:48px; height:48px;
+                 background:linear-gradient(135deg,#00aaff,#0088cc);
+                 border-radius:14px; display:flex;
+                 align-items:center; justify-content:center;
+                 font-size:22px; flex-shrink:0;
+                 box-shadow:0 4px 14px #00aaff44; }
+  .device-name { color:#00aaff; font-size:14px;
+                 font-weight:800; letter-spacing:1px;
+                 word-break:break-all; }
+  .device-key { color:#6a7a8c; font-size:11px;
+                margin-top:3px; }
+
+  .toast { position:fixed; left:20px; right:20px; bottom:30px;
+           padding:16px 20px; background:#1a2330;
+           border-left:4px solid #00ff88;
+           border-radius:14px; color:#00ff88;
+           font-size:13px; font-weight:600;
+           display:none; z-index:100;
+           box-shadow:0 10px 30px #000c; }
+  .toast.err { border-color:#ff5555; color:#ff5555; }
+  .toast.show { display:block; }
+  .empty { text-align:center; color:#3a4552;
+           padding:40px 20px; font-size:13px; }
+
+  .stat-grid { display:grid; grid-template-columns:1fr 1fr;
+               gap:10px; margin-bottom:16px; }
+  .stat { background:#1a2330; border-radius:12px;
+          padding:14px; text-align:center;
+          border:1px solid #1f2a3a; }
+  .stat-num { color:#00ff88; font-size:24px;
+              font-weight:900; }
+  .stat-lbl { color:#6a7a8c; font-size:10px;
+              letter-spacing:1px; margin-top:4px;
+              text-transform:uppercase; }
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div>
+    <h1>NAK ADMIN</h1>
+    <div class="time">{{ now }}</div>
+  </div>
+  <a class="logout" href="/admin/logout">LOGOUT</a>
+</div>
+
+<div class="tabs">
+  <div class="tab active" onclick="switchTab('keys', event)">🔑 Keys</div>
+  <div class="tab" onclick="switchTab('devices', event)">📱 Devices</div>
+  <div class="tab" onclick="switchTab('create', event)">➕ Create</div>
+  <div class="tab" onclick="switchTab('edit', event)">✏️ Edit</div>
+</div>
+
+<!-- KEYS PAGE -->
+<div class="page active" id="page-keys">
+  <div class="card">
+    <h2>🔍 SEARCH & MANAGE</h2>
+    <div class="search-box">
+      <span class="search-icon">🔍</span>
+      <input id="searchKeys" type="text"
+             placeholder="Search key, HWID, device, note..."
+             oninput="onSearchKeys()">
+      <button class="clear-btn" id="clearKeys" onclick="clearSearch('keys')">✕</button>
+    </div>
+    <div class="search-info" id="searchInfoKeys"></div>
+    <button class="alt" onclick="loadList()">🔄 REFRESH</button>
+    <div id="keyList" style="margin-top:16px;"></div>
+  </div>
+</div>
+
+<!-- DEVICES PAGE -->
+<div class="page" id="page-devices">
+  <div class="stat-grid">
+    <div class="stat">
+      <div class="stat-num" id="stat-total">0</div>
+      <div class="stat-lbl">Total Devices</div>
+    </div>
+    <div class="stat">
+      <div class="stat-num" id="stat-active">0</div>
+      <div class="stat-lbl">Active Now</div>
+    </div>
+  </div>
+  <div class="card">
+    <h2>📱 DEVICES</h2>
+    <div class="search-box">
+      <span class="search-icon">🔍</span>
+      <input id="searchDevices" type="text"
+             placeholder="Search device, key, OS, HWID..."
+             oninput="onSearchDevices()">
+      <button class="clear-btn" id="clearDevices" onclick="clearSearch('devices')">✕</button>
+    </div>
+    <div class="search-info" id="searchInfoDevices"></div>
+    <button class="alt" onclick="loadDevices()">🔄 REFRESH</button>
+    <div id="deviceList" style="margin-top:16px;"></div>
+  </div>
+</div>
+
+<!-- CREATE PAGE -->
+<div class="page" id="page-create">
+  <div class="card">
+    <h2>➕ CREATE NEW KEY</h2>
+    <label>License Key</label>
+    <input id="c_key" placeholder="NAK-XXXX-XXXX">
+    <label>Note (optional)</label>
+    <input id="c_note" placeholder="customer name">
+    <label>Expiry Date</label>
+    <div class="row">
+      <input id="c_year"  type="number" placeholder="Year"  value="2027">
+      <input id="c_month" type="number" placeholder="Month" value="12" min="1" max="12">
+      <input id="c_day"   type="number" placeholder="Day"   value="31" min="1" max="31">
+    </div>
+    <label>Expiry Time</label>
+    <div class="row">
+      <input id="c_hour"   type="number" placeholder="Hour"   value="23" min="0" max="23">
+      <input id="c_minute" type="number" placeholder="Min"    value="0"  min="0" max="59">
+    </div>
+    <button onclick="createKey()">CREATE KEY</button>
+  </div>
+</div>
+
+<!-- EDIT PAGE -->
+<div class="page" id="page-edit">
+  <div class="card">
+    <h2>✏️ EDIT / CHANGE KEY</h2>
+    <label>Current Key</label>
+    <input id="u_old" placeholder="old key">
+    <label>New Key (blank = keep)</label>
+    <input id="u_new" placeholder="new key (optional)">
+    <label>New Expiry Date</label>
+    <div class="row">
+      <input id="u_year"  type="number" value="2027">
+      <input id="u_month" type="number" value="12" min="1" max="12">
+      <input id="u_day"   type="number" value="31" min="1" max="31">
+    </div>
+    <label>New Expiry Time</label>
+    <div class="row">
+      <input id="u_hour"   type="number" value="23" min="0" max="23">
+      <input id="u_minute" type="number" value="0"  min="0" max="59">
+    </div>
+    <label>New Note (optional)</label>
+    <input id="u_note" placeholder="leave blank to keep">
+    <label style="display:flex;align-items:center;gap:10px;
+                  text-transform:none;letter-spacing:0;
+                  font-size:13px;color:#c8d4e0;">
+      <input type="checkbox" id="u_reset"
+             style="width:auto;padding:0;transform:scale(1.3);">
+      Reset HWID + Device binding
+    </label>
+    <button onclick="updateKey()">UPDATE KEY</button>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+let DB_CACHE = {};
+let SEARCH_KEYS = "";
+let SEARCH_DEVICES = "";
+
+function switchTab(name, e) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+  e.target.classList.add('active');
+  document.getElementById('page-' + name).classList.add('active');
+  if (name === 'devices') loadDevices();
+  if (name === 'keys') loadList();
+}
+
+function toast(msg, isErr) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.className = 'toast show' + (isErr ? ' err' : '');
+  setTimeout(() => t.className = 'toast' + (isErr ? ' err' : ''), 2600);
+}
+
+async function post(url, data) {
+  const r = await fetch(url, {
+    method: 'POST',
+    headers: {'Content-Type':'application/x-www-form-urlencoded'},
+    body: new URLSearchParams(data),
+  });
+  return await r.json();
+}
+
+// ---------------- SEARCH ----------------
+function onSearchKeys() {
+  SEARCH_KEYS = document.getElementById('searchKeys').value.toLowerCase();
+  document.getElementById('clearKeys').classList.toggle('show', SEARCH_KEYS.length > 0);
+  renderKeys();
+}
+
+function onSearchDevices() {
+  SEARCH_DEVICES = document.getElementById('searchDevices').value.toLowerCase();
+  document.getElementById('clearDevices').classList.toggle('show', SEARCH_DEVICES.length > 0);
+  renderDevices();
+}
+
+function clearSearch(which) {
+  if (which === 'keys') {
+    document.getElementById('searchKeys').value = '';
+    SEARCH_KEYS = '';
+    document.getElementById('clearKeys').classList.remove('show');
+    renderKeys();
+  } else {
+    document.getElementById('searchDevices').value = '';
+    SEARCH_DEVICES = '';
+    document.getElementById('clearDevices').classList.remove('show');
+    renderDevices();
+  }
+}
+
+// ---------------- CREATE / UPDATE ----------------
+async function createKey() {
+  const data = {
+    key:    document.getElementById('c_key').value.trim(),
+    note:   document.getElementById('c_note').value.trim(),
+    year:   document.getElementById('c_year').value,
+    month:  document.getElementById('c_month').value,
+    day:    document.getElementById('c_day').value,
+    hour:   document.getElementById('c_hour').value,
+    minute: document.getElementById('c_minute').value,
+  };
+  if (!data.key) return toast('Enter a key', true);
+  const j = await post('/admin/api/create', data);
+  if (j.ok) {
+    toast('✅ Key created: ' + j.key);
+    document.getElementById('c_key').value = '';
+    loadList();
+  } else toast('❌ ' + j.reason, true);
+}
+
+async function updateKey() {
+  const data = {
+    old_key: document.getElementById('u_old').value.trim(),
+    new_key: document.getElementById('u_new').value.trim(),
+    note:    document.getElementById('u_note').value.trim(),
+    year:    document.getElementById('u_year').value,
+    month:   document.getElementById('u_month').value,
+    day:     document.getElementById('u_day').value,
+    hour:    document.getElementById('u_hour').value,
+    minute:  document.getElementById('u_minute').value,
+    reset_hwid: document.getElementById('u_reset').checked ? '1' : '0',
+  };
+  if (!data.old_key) return toast('Enter current key', true);
+  const j = await post('/admin/api/update', data);
+  if (j.ok) { toast('✅ Updated: ' + j.key); loadList(); }
+  else toast('❌ ' + j.reason, true);
+}
+
+async function delKey(k) {
+  if (!confirm('Delete key: ' + k + ' ?')) return;
+  const j = await post('/admin/api/delete', {key: k});
+  if (j.ok) { toast('🗑 Deleted'); loadList(); }
+  else toast('❌ ' + j.reason, true);
+}
+
+async function unbindKey(k) {
+  const j = await post('/admin/api/unbind', {key: k});
+  if (j.ok) { toast('🔓 Unbound'); loadList(); }
+  else toast('❌ ' + j.reason, true);
+}
+
+// ---------------- RENEW ----------------
+async function renewKey(k, days) {
+  const j = await post('/admin/api/renew', {key: k, days: days});
+  if (j.ok) {
+    toast('✅ Renewed ' + j.key + ' +' + j.days_added + 'd → ' + j.expiry.slice(0,16).replace('T',' '));
+    loadList();
+  } else toast('❌ ' + j.reason, true);
+}
+
+async function renewCustom(k) {
+  const d = prompt('How many days to add?', '30');
+  if (d === null) return;
+  const n = parseInt(d, 10);
+  if (isNaN(n) || n <= 0) return toast('Invalid number', true);
+  renewKey(k, n);
+}
+
+// ---------------- RENDER ----------------
+function renderDeviceBox(v) {
+  if (!v.device && !v.hwid) {
+    return '<div class="key-meta">📱 Device : <b>— No device yet —</b></div>';
+  }
+  let html = `
+    <div class="device-box">
+      <div class="device-title">
+        <span class="dot"></span> 📱 DEVICE INFO
+      </div>
+      <div class="device-line"><span class="lbl">Model</span><span class="val hi">${v.device || 'Unknown'}</span></div>
+      <div class="device-line"><span class="lbl">OS</span><span class="val">${v.os || 'Unknown'}</span></div>
+      <div class="device-line"><span class="lbl">HWID</span><span class="val">${v.hwid ? v.hwid : 'FREE'}</span></div>
+      ${v.last_login ? `<div class="device-line"><span class="lbl">Last</span><span class="val">${v.last_login.replace('T',' ').slice(0,16)}</span></div>` : ''}
+      ${v.login_count ? `<div class="device-line"><span class="lbl">Count</span><span class="val hi">${v.login_count} login(s)</span></div>` : ''}
+    </div>
+  `;
+  return html;
+}
+
+function renewRow(k) {
+  return `
+    <div class="renew-label"><span class="icon">⏰</span> RENEW EXPIRY</div>
+    <div class="renew-row">
+      <button onclick="renewKey('${k}', 1)">+1d</button>
+      <button onclick="renewKey('${k}', 7)">+7d</button>
+      <button onclick="renewKey('${k}', 30)">+30d</button>
+      <button onclick="renewCustom('${k}')">+Custom</button>
+    </div>
+  `;
+}
+
+function matchKey(k, v, q) {
+  if (!q) return true;
+  const hay = [
+    k,
+    v.note || "",
+    v.hwid || "",
+    v.device || "",
+    v.os || "",
+    v.ver || "",
+  ].join(" ").toLowerCase();
+  return hay.includes(q);
+}
+
+function renderKeys() {
+  const box = document.getElementById('keyList');
+  box.innerHTML = '';
+  const now = new Date();
+  const keys = Object.keys(DB_CACHE);
+  const filtered = keys.filter(k => matchKey(k, DB_CACHE[k], SEARCH_KEYS));
+
+  const info = document.getElementById('searchInfoKeys');
+  if (SEARCH_KEYS) {
+    info.innerHTML = `Found <b>${filtered.length}</b> of <b>${keys.length}</b> keys`;
+  } else {
+    info.innerHTML = `Showing <b>${keys.length}</b> keys`;
+  }
+
+  if (filtered.length === 0) {
+    box.innerHTML = '<div class="empty">No matching keys</div>';
+    return;
+  }
+
+  for (const k of filtered) {
+    const v = DB_CACHE[k];
+    const exp = new Date(v.expiry);
+    const expired = exp < now;
+    const item = document.createElement('div');
+    item.className = 'key-item' + (expired ? ' expired' : '');
+    item.innerHTML = `
+      <div class="key-name${expired?' expired':''}">
+        <span class="kname">${k}</span>
+      </div>
+      <div class="key-meta">📅 <b>${v.expiry.replace('T',' ').slice(0,16)}</b></div>
+      ${v.note ? `<div class="key-meta">📝 <b>${v.note}</b></div>` : ''}
+      ${renderDeviceBox(v)}
+      <div style="margin-top:10px;">
+        <span class="tag ${expired?'bad':'ok'}">${expired?'EXPIRED':'ACTIVE'}</span>
+        ${v.device ? `<span class="tag dev">📱 ${v.device}</span>` : ''}
+        ${!v.hwid ? `<span class="tag free">FREE</span>` : ''}
+      </div>
+      ${renewRow(k)}
+      <div class="key-actions" style="margin-top:12px;">
+        <button class="danger" onclick="delKey('${k}')">DELETE</button>
+        ${v.hwid ? `<button class="alt" onclick="unbindKey('${k}')">UNBIND</button>` : ''}
+      </div>
+    `;
+    box.appendChild(item);
+  }
+}
+
+function renderDevices() {
+  const box = document.getElementById('deviceList');
+  box.innerHTML = '';
+  const now = new Date();
+
+  let total = 0, active = 0;
+  const entries = [];
+
+  for (const k of Object.keys(DB_CACHE)) {
+    const v = DB_CACHE[k];
+    if (v.device || v.hwid) {
+      total++;
+      const exp = new Date(v.expiry);
+      if (exp >= now) active++;
+      if (!SEARCH_DEVICES || matchKey(k, v, SEARCH_DEVICES)) {
+        entries.push({key: k, v: v});
+      }
+    }
+  }
+
+  document.getElementById('stat-total').textContent = total;
+  document.getElementById('stat-active').textContent = active;
+
+  const info = document.getElementById('searchInfoDevices');
+  if (SEARCH_DEVICES) {
+    info.innerHTML = `Found <b>${entries.length}</b> of <b>${total}</b> devices`;
+  } else {
+    info.innerHTML = `Showing <b>${entries.length}</b> devices`;
+  }
+
+  if (entries.length === 0) {
+    box.innerHTML = '<div class="empty">No devices yet<br>Waiting for client logins...</div>';
+    return;
+  }
+
+  entries.sort((a, b) => {
+    const ta = a.v.last_login || "";
+    const tb = b.v.last_login || "";
+    return tb.localeCompare(ta);
+  });
+
+  for (const {key, v} of entries) {
+    const exp = new Date(v.expiry);
+    const expired = exp < now;
+    const card = document.createElement('div');
+    card.className = 'device-card';
+    card.style.borderColor = expired ? '#ff555533' : '#00aaff33';
+    card.innerHTML = `
+      <div class="device-header">
+        <div class="device-icon">📱</div>
+        <div>
+          <div class="device-name">${v.device || 'Unknown Device'}</div>
+          <div class="device-key">Key: <b style="color:#00ff88;">${key}</b></div>
+        </div>
+      </div>
+      <div class="device-box">
+        <div class="device-title"><span class="dot"></span> SYSTEM INFO</div>
+        <div class="device-line"><span class="lbl">Model</span><span class="val hi">${v.device || 'Unknown'}</span></div>
+        <div class="device-line"><span class="lbl">OS</span><span class="val">${v.os || 'Unknown'}</span></div>
+        <div class="device-line"><span class="lbl">HWID</span><span class="val">${v.hwid || 'FREE'}</span></div>
+        ${v.last_login ? `<div class="device-line"><span class="lbl">Last</span><span class="val">${v.last_login.replace('T',' ').slice(0,16)}</span></div>` : ''}
+        <div class="device-line"><span class="lbl">Count</span><span class="val hi">${v.login_count || 0} login(s)</span></div>
+      </div>
+      ${renewRow(key)}
+      <div style="margin-top:10px;">
+        <span class="tag ${expired?'bad':'ok'}">${expired?'EXPIRED':'ACTIVE'}</span>
+      </div>
+    `;
+    box.appendChild(card);
+  }
+}
+
+// ---------------- LOAD ----------------
+async function loadList() {
+  const r = await fetch('/admin/api/list');
+  const j = await r.json();
+  if (!j.ok) return;
+  DB_CACHE = j.data;
+  renderKeys();
+}
+
+async function loadDevices() {
+  await loadList();
+  renderDevices();
+}
+
+loadList();
+</script>
+</body>
+</html>
+"""
+
+
+if __name__ == "__main__":
+    print("=" * 60)
+    print("  NAK NEVER DIE - Admin Panel v6.3")
+    print("  Search + Renew + Device Info")
+    print("  Panel : http://0.0.0.0:5000/admin")
+    print("  API   : http://0.0.0.0:5000/check")
+    print(f"  Login : {ADMIN_USER} / {ADMIN_PASS}")
+    print("=" * 60)
+    app.run(host="0.0.0.0", port=5000, debug=False)
