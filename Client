@@ -1,0 +1,823 @@
+# ============================================================
+#   NAK NEVER DIE - Client v6.1 (Hacker Edition)
+#   Run: python client.py
+# ============================================================
+
+import os
+import sys
+import json
+import uuid
+import socket
+import struct
+import zlib
+import hashlib
+import datetime
+import getpass
+import platform
+import urllib.parse
+import urllib.request
+import urllib.error
+
+
+# ---------------- CONFIG ----------------
+SERVER_URL = "http://127.0.0.1:5000"
+TIMEOUT = 10
+CACHE_FILE = ".nak_session"
+TITLE = "NAK NEVER DIE"
+VERSION = "6.1.0"
+# ----------------------------------------
+
+
+def clear_screen():
+    os.system("clear" if os.name != "nt" else "cls")
+
+
+# ============================================================
+#   HACKER BANNER
+# ============================================================
+
+BANNER = r"""
+    ███╗   ██╗ █████╗ ██╗  ██╗
+    ████╗  ██║██╔══██╗██║ ██╔╝
+    ██╔██╗ ██║███████║█████╔╝
+    ██║╚██╗██║██╔══██║██╔═██╗
+    ██║ ╚████║██║  ██║██║  ██╗
+    ╚═╝  ╚═══╝╚═╝  ╚═╝╚═╝  ╚═╝
+
+    ███╗   ██╗███████╗██╗   ██╗███████╗██████╗
+    ████╗  ██║██╔════╝██║   ██║██╔════╝██╔══██╗
+    ██╔██╗ ██║█████╗  ██║   ██║█████╗  ██████╔╝
+    ██║╚██╗██║██╔══╝  ╚██╗ ██╔╝██╔══╝  ██╔══██╗
+    ██║ ╚████║███████╗ ╚████╔╝ ███████╗██║  ██║
+    ╚═╝  ╚═══╝╚══════╝  ╚═══╝  ╚══════╝╚═╝  ╚═╝
+
+              ██████╗ ██╗███████╗
+              ██╔══██╗██║██╔════╝
+              ██║  ██║██║█████╗
+              ██║  ██║██║██╔══╝
+              ██████╔╝██║███████╗
+              ╚═════╝ ╚═╝╚══════╝
+
+      [ SYSTEM ONLINE ]  [ ACCESS GRANTED ]
+"""
+
+
+def show_banner():
+    print(BANNER)
+
+
+# ============================================================
+#   DEVICE INFO
+# ============================================================
+
+def get_device_model():
+    try:
+        if os.path.isdir("/data/data/com.termux"):
+            try:
+                with open("/system/build.prop", "r") as f:
+                    for line in f:
+                        if line.startswith("ro.product.model="):
+                            return line.split("=", 1)[1].strip()
+            except Exception:
+                pass
+            return "Android Device"
+        if platform.system() == "Linux":
+            try:
+                with open("/etc/hostname") as f:
+                    return f.read().strip()
+            except Exception:
+                pass
+        return platform.node() or "Unknown"
+    except Exception:
+        return "Unknown"
+
+
+def get_device_info():
+    return {
+        "device": get_device_model(),
+        "os": "%s %s (%s)" % (platform.system(), platform.release(), platform.machine()),
+        "ver": platform.version(),
+    }
+
+
+def get_hwid():
+    parts = [
+        platform.node(),
+        platform.machine(),
+        platform.system(),
+        str(uuid.getnode()),
+    ]
+    try:
+        parts.append(socket.gethostbyname(socket.gethostname()))
+    except Exception:
+        pass
+    raw = "|".join(parts).encode()
+    return hashlib.sha256(raw).hexdigest()[:32].upper()
+
+
+# ============================================================
+#   SESSION CACHE
+# ============================================================
+
+def save_session(data):
+    try:
+        with open(CACHE_FILE, "w") as f:
+            json.dump(data, f)
+    except Exception:
+        pass
+
+
+def load_session():
+    if not os.path.isfile(CACHE_FILE):
+        return None
+    try:
+        with open(CACHE_FILE, "r") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+# ============================================================
+#   SERVER CHECK
+# ============================================================
+
+def server_check(key, hwid):
+    info = get_device_info()
+    params = {
+        "key": key,
+        "hwid": hwid,
+        "device": info["device"],
+        "os": info["os"],
+        "ver": info["ver"],
+    }
+    qs = urllib.parse.urlencode(params)
+    url = SERVER_URL + "/check?" + qs
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "NAK-Client/6.1"})
+        with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
+            return json.loads(r.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        try:
+            return json.loads(e.read().decode("utf-8"))
+        except Exception:
+            return {"ok": False, "reason": "http_" + str(e.code)}
+    except urllib.error.URLError as e:
+        print("  [!] Cannot reach server: " + str(e.reason))
+        print("  [!] URL: " + url)
+        return None
+    except Exception as e:
+        print("  [!] Error: " + str(e))
+        return None
+
+
+# ============================================================
+#   LOGIN
+# ============================================================
+
+def check_login():
+    hwid = get_hwid()
+    info = get_device_info()
+
+    clear_screen()
+    show_banner()
+    print("  +----------------------------------------------+")
+    print("  |            >> LOGIN REQUIRED <<              |")
+    print("  +----------------------------------------------+")
+    print("")
+    print("  [*] Device  : " + info["device"])
+    print("  [*] OS      : " + info["os"])
+    print("  [*] HWID    : " + hwid)
+    print("  [*] Server  : " + SERVER_URL)
+    print("")
+
+    cached = load_session()
+    if cached and cached.get("hwid") == hwid and cached.get("ok"):
+        try:
+            exp = datetime.datetime.fromisoformat(cached["expiry"])
+            if datetime.datetime.now() < exp:
+                print("  [✓] Session cached until " + str(exp))
+                print("")
+                return True
+        except Exception:
+            pass
+
+    attempts = 3
+    while attempts > 0:
+        try:
+            key = getpass.getpass("  [>] Enter Login Key: ").strip()
+        except Exception:
+            key = input("  [>] Enter Login Key: ").strip()
+
+        if not key:
+            attempts -= 1
+            print("  [!] Empty key. Attempts left: " + str(attempts))
+            continue
+
+        print("  [*] Contacting server...")
+        res = server_check(key, hwid)
+
+        if res is None:
+            print("  [!] Server unreachable.")
+            print("  [!] Is admin_panel.py running?")
+            return False
+
+        if res.get("ok"):
+            expiry = res.get("expiry", "")
+            save_session({
+                "ok": True,
+                "key": key,
+                "hwid": hwid,
+                "expiry": expiry,
+            })
+            clear_screen()
+            show_banner()
+            print("  +----------------------------------------------+")
+            print("  |           >> LOGIN SUCCESS <<                |")
+            print("  +----------------------------------------------+")
+            print("")
+            print("  [✓] Key     : " + key)
+            print("  [✓] Expires : " + expiry)
+            print("")
+            return True
+
+        reason = res.get("reason", "denied")
+
+        if reason == "invalid_key":
+            attempts -= 1
+            print("  [!] Key not found. Attempts left: " + str(attempts))
+        elif reason == "expired":
+            print("  [!] License EXPIRED (" + str(res.get("expiry", "")) + ")")
+            return False
+        elif reason == "hwid_mismatch":
+            print("  [!] Key bound to another PC")
+            print("  [!] Bound HWID: " + str(res.get("bound_hwid", "?")))
+            return False
+        else:
+            attempts -= 1
+            print("  [!] Denied: " + reason + ". Attempts left: " + str(attempts))
+
+    print("  [X] Access denied.")
+    return False
+
+
+# ============================================================
+#   PAK UNPACKER
+# ============================================================
+
+class PakEntry:
+    def __init__(self, name, offset, size, compressed):
+        self.name = name
+        self.offset = offset
+        self.size = size
+        self.compressed = compressed
+
+
+def unpack_pak(pak_path, out_dir):
+    print("  [*] Unpacking: " + pak_path)
+    os.makedirs(out_dir, exist_ok=True)
+
+    with open(pak_path, "rb") as f:
+        magic = f.read(4)
+
+        if magic == b"NAKP":
+            count = struct.unpack("<I", f.read(4))[0]
+            entries = []
+            for _ in range(count):
+                name_len = struct.unpack("<H", f.read(2))[0]
+                name = f.read(name_len).decode("utf-8", "ignore")
+                offset, size, comp = struct.unpack("<IIB", f.read(9))
+                entries.append(PakEntry(name, offset, size, comp))
+
+            for e in entries:
+                f.seek(e.offset)
+                blob = f.read(e.size)
+
+                if e.compressed:
+                    try:
+                        blob = zlib.decompress(blob)
+                    except Exception as ex:
+                        print("  [!] Decompress failed for " + e.name + ": " + str(ex))
+
+                target = os.path.join(out_dir, e.name)
+                os.makedirs(os.path.dirname(target) or out_dir, exist_ok=True)
+                with open(target, "wb") as o:
+                    o.write(blob)
+
+                print("  [✓] " + e.name + "  (" + str(len(blob)) + " bytes)")
+
+            print("  [✓] Unpack complete -> " + out_dir)
+            return
+
+        else:
+            f.seek(0)
+            data = f.read()
+            out_file = os.path.join(out_dir, os.path.basename(pak_path) + ".bin")
+            with open(out_file, "wb") as o:
+                o.write(data)
+            print("  [!] Unknown format, dumped raw -> " + out_file)
+
+
+def repak_folder(folder, out_pak, compress=False):
+    print("  [*] Repacking: " + folder + " -> " + out_pak)
+
+    files = []
+    for root, _, names in os.walk(folder):
+        for n in names:
+            full = os.path.join(root, n)
+            rel = os.path.relpath(full, folder).replace("\\", "/")
+            files.append((rel, full))
+
+    if not files:
+        print("  [!] No files found.")
+        return
+
+    index_size = 0
+    for name, _ in files:
+        nb = name.encode("utf-8")
+        index_size += 2 + len(nb) + 4 + 4 + 1
+
+    data_offset = 8 + index_size
+
+    header = b"NAKP" + struct.pack("<I", len(files))
+    entries_index = bytearray()
+    body = bytearray()
+
+    for name, full in files:
+        with open(full, "rb") as f:
+            data = f.read()
+
+        if compress:
+            data = zlib.compress(data)
+
+        nb = name.encode("utf-8")
+        entries_index += struct.pack("<H", len(nb)) + nb
+        entries_index += struct.pack("<IIB",
+                                     data_offset + len(body),
+                                     len(data),
+                                     1 if compress else 0)
+        body += data
+
+    with open(out_pak, "wb") as f:
+        f.write(header)
+        f.write(entries_index)
+        f.write(body)
+
+    print("  [✓] Repacked " + str(len(files)) + " files -> " + out_pak)
+
+
+# ============================================================
+#   ENCRYPT / DECRYPT
+# ============================================================
+
+try:
+    import xxtea
+    HAS_XXTEA = True
+except ImportError:
+    HAS_XXTEA = False
+
+
+LUA_SIGNATURES = {
+    b"\x1bLua":  "Lua 5.1/5.2/5.3 bytecode",
+    b"\x1bLuaQ": "LuaJIT bytecode",
+    b"\x1bLJ":   "LuaJIT bytecode (alt)",
+}
+
+
+def detect_lua_type(data):
+    for sig, name in LUA_SIGNATURES.items():
+        if data.startswith(sig):
+            return name
+    head = data[:2048]
+    if b"function" in head or b"local" in head or b"return" in head:
+        return "Plain-text Lua source"
+    return "Unknown / Encrypted"
+
+
+def xxtea_decrypt(data, key):
+    if not HAS_XXTEA:
+        raise RuntimeError("Install xxtea: pip install xxtea")
+    return xxtea.decrypt(data, key, padding=False)
+
+
+def xxtea_encrypt(data, key):
+    if not HAS_XXTEA:
+        raise RuntimeError("Install xxtea: pip install xxtea")
+    return xxtea.encrypt(data, key, padding=False)
+
+
+def xor_decrypt(data, key):
+    return bytes(b ^ key[i % len(key)] for i, b in enumerate(data))
+
+
+def decrypt_file(in_path, out_path, method="xxtea", key="NAK2026VIP"):
+    print("  [*] Reading: " + in_path)
+    with open(in_path, "rb") as f:
+        raw = f.read()
+
+    kind = detect_lua_type(raw)
+    print("  [*] Detected: " + kind)
+
+    if "Plain-text" in kind:
+        out = raw
+    elif method == "xxtea":
+        out = xxtea_decrypt(raw, key.encode())
+    elif method == "xor":
+        out = xor_decrypt(raw, key.encode())
+    elif method == "none":
+        out = raw
+    else:
+        raise ValueError("Unknown method: " + method)
+
+    os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+    with open(out_path, "wb") as f:
+        f.write(out)
+
+    print("  [✓] Decrypted -> " + out_path)
+    return out_path
+
+
+def encrypt_file(in_path, out_path, method="xxtea", key="NAK2026VIP"):
+    print("  [*] Reading: " + in_path)
+    with open(in_path, "rb") as f:
+        raw = f.read()
+
+    if method == "xxtea":
+        out = xxtea_encrypt(raw, key.encode())
+    elif method == "xor":
+        out = xor_decrypt(raw, key.encode())
+    elif method == "none":
+        out = raw
+    else:
+        raise ValueError("Unknown method: " + method)
+
+    os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+    with open(out_path, "wb") as f:
+        f.write(out)
+
+    print("  [✓] Encrypted -> " + out_path)
+    return out_path
+
+
+# ============================================================
+#   LUAJIT EDITOR
+# ============================================================
+
+LUJIT_SIG = b"\x1bLJ"
+
+
+def _read(path):
+    with open(path, "rb") as f:
+        return bytearray(f.read())
+
+
+def _write(path, data):
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    with open(path, "wb") as f:
+        f.write(data)
+
+
+def hexdump(data, offset=0, length=256):
+    chunk = data[offset:offset + length]
+    lines = []
+    for i in range(0, len(chunk), 16):
+        row = chunk[i:i + 16]
+        hex_part = " ".join("%02X" % b for b in row)
+        ascii_part = "".join(chr(b) if 32 <= b < 127 else "." for b in row)
+        lines.append("  %08X  %-47s  |%s|" % (offset + i, hex_part, ascii_part))
+    return "\n".join(lines)
+
+
+def inspect_file(path):
+    data = _read(path)
+    print("")
+    print("  [*] File: " + path)
+    print("  [*] Size: " + str(len(data)) + " bytes")
+
+    if data.startswith(LUJIT_SIG):
+        print("")
+        print("  [*] Format: LuaJIT bytecode")
+        print("  [*] Version: " + str(data[3] if len(data) > 3 else 0))
+        flags = data[4] if len(data) > 4 else 0
+        print("  [*] Flags  : 0x%02X" % flags)
+        print("      big_endian: " + str(bool(flags & 0x01)))
+        print("      stripped  : " + str(bool(flags & 0x02)))
+        print("      ffi       : " + str(bool(flags & 0x04)))
+        print("      fr2       : " + str(bool(flags & 0x08)))
+    elif data.startswith(b"\x1bLua"):
+        print("")
+        print("  [*] Format: Lua 5.1/5.2/5.3 bytecode")
+    else:
+        print("")
+        print("  [!] Format: Unknown")
+
+    print("")
+    print("  [*] Hex dump (first 256 bytes):")
+    print(hexdump(data, 0, 256))
+
+
+def patch_bytes(path, offset, new_bytes_hex, out_path=None):
+    data = _read(path)
+    try:
+        patch = bytes.fromhex(new_bytes_hex.replace(" ", ""))
+    except ValueError:
+        print("  [!] Invalid hex string.")
+        return
+    if offset + len(patch) > len(data):
+        print("  [!] Patch exceeds file size.")
+        return
+    original = data[offset:offset + len(patch)]
+    data[offset:offset + len(patch)] = patch
+    out_path = out_path or path
+    _write(out_path, data)
+    print("  [✓] Patched " + str(len(patch)) + " byte(s) at 0x%X" % offset)
+    print("      Before: " + " ".join("%02X" % b for b in original))
+    print("      After : " + " ".join("%02X" % b for b in patch))
+    print("      Saved : " + out_path)
+
+
+def find_pattern(path, hex_pattern):
+    data = _read(path)
+    try:
+        pat = bytes.fromhex(hex_pattern.replace(" ", ""))
+    except ValueError:
+        print("  [!] Invalid hex pattern.")
+        return []
+    matches = []
+    start = 0
+    while True:
+        idx = data.find(pat, start)
+        if idx == -1:
+            break
+        matches.append(idx)
+        start = idx + 1
+    if matches:
+        print("  [✓] Found " + str(len(matches)) + " match(es):")
+        for m in matches:
+            print("      0x%08X" % m)
+    else:
+        print("  [!] No matches found.")
+    return matches
+
+
+def replace_pattern(path, old_hex, new_hex, out_path=None):
+    data = _read(path)
+    try:
+        old = bytes.fromhex(old_hex.replace(" ", ""))
+        new = bytes.fromhex(new_hex.replace(" ", ""))
+    except ValueError:
+        print("  [!] Invalid hex.")
+        return
+    if len(old) != len(new):
+        print("  [!] Lengths differ.")
+        return
+    count = data.count(old)
+    if count == 0:
+        print("  [!] Pattern not found.")
+        return
+    data = data.replace(old, new)
+    out_path = out_path or path
+    _write(out_path, data)
+    print("  [✓] Replaced " + str(count) + " occurrence(s) -> " + out_path)
+
+
+def set_flag(path, flag_name, enabled, out_path=None):
+    data = _read(path)
+    if not data.startswith(LUJIT_SIG):
+        print("  [!] Not a LuaJIT bytecode file.")
+        return
+    flag_bits = {
+        "big_endian": 0x01,
+        "stripped":   0x02,
+        "ffi":        0x04,
+        "fr2":        0x08,
+    }
+    if flag_name not in flag_bits:
+        print("  [!] Unknown flag: " + flag_name)
+        print("      Available: " + str(list(flag_bits.keys())))
+        return
+    bit = flag_bits[flag_name]
+    if enabled:
+        data[4] |= bit
+    else:
+        data[4] &= ~bit
+    out_path = out_path or path
+    _write(out_path, data)
+    state = "ON" if enabled else "OFF"
+    print("  [✓] Flag '" + flag_name + "' set " + state + " -> " + out_path)
+
+
+def editor_menu():
+    while True:
+        print("")
+        print("  +---------- LuaJIT Bytecode Editor ----------+")
+        print("  |  [1] Inspect file (header + hex)          |")
+        print("  |  [2] Hex dump at offset                   |")
+        print("  |  [3] Patch bytes at offset                |")
+        print("  |  [4] Find hex pattern                     |")
+        print("  |  [5] Replace hex pattern                  |")
+        print("  |  [6] Toggle LuaJIT flag                   |")
+        print("  |  [7] Back                                 |")
+        print("  +-------------------------------------------+")
+        print("")
+
+        c = input("  [>] Select: ").strip()
+
+        if c == "1":
+            p = input("  [>] File path: ").strip()
+            if os.path.isfile(p):
+                inspect_file(p)
+            else:
+                print("  [!] File not found.")
+
+        elif c == "2":
+            p = input("  [>] File path: ").strip()
+            if not os.path.isfile(p):
+                print("  [!] File not found.")
+                continue
+            try:
+                off = int(input("  [>] Offset (dec or 0x..): ").strip(), 0)
+                ln = int(input("  [>] Length (default 256): ").strip() or "256")
+            except ValueError:
+                print("  [!] Invalid number.")
+                continue
+            data = _read(p)
+            print(hexdump(data, off, ln))
+
+        elif c == "3":
+            p = input("  [>] File path: ").strip()
+            if not os.path.isfile(p):
+                print("  [!] File not found.")
+                continue
+            try:
+                off = int(input("  [>] Offset (dec or 0x..): ").strip(), 0)
+            except ValueError:
+                print("  [!] Invalid offset.")
+                continue
+            hx = input("  [>] New bytes (hex): ").strip()
+            out = input("  [>] Output file (blank = overwrite): ").strip() or None
+            patch_bytes(p, off, hx, out)
+
+        elif c == "4":
+            p = input("  [>] File path: ").strip()
+            if not os.path.isfile(p):
+                print("  [!] File not found.")
+                continue
+            hx = input("  [>] Hex pattern: ").strip()
+            find_pattern(p, hx)
+
+        elif c == "5":
+            p = input("  [>] File path: ").strip()
+            if not os.path.isfile(p):
+                print("  [!] File not found.")
+                continue
+            old = input("  [>] Old hex: ").strip()
+            new = input("  [>] New hex: ").strip()
+            out = input("  [>] Output file (blank = overwrite): ").strip() or None
+            replace_pattern(p, old, new, out)
+
+        elif c == "6":
+            p = input("  [>] File path: ").strip()
+            if not os.path.isfile(p):
+                print("  [!] File not found.")
+                continue
+            flag = input("  [>] Flag [stripped/ffi/fr2/big_endian]: ").strip()
+            onoff = input("  [>] Enable? (y/n): ").strip().lower() == "y"
+            out = input("  [>] Output file (blank = overwrite): ").strip() or None
+            set_flag(p, flag, onoff, out)
+
+        elif c == "7":
+            break
+        else:
+            print("  [!] Invalid choice.")
+
+
+# ============================================================
+#   MAIN MENU
+# ============================================================
+
+MENU = """
+  +------------ NAK NEVER DIE v6.1 ------------+
+  |                                            |
+  |   [1] Unpack PAK                           |
+  |   [2] Repack PAK                           |
+  |   [3] Decrypt Lua                          |
+  |   [4] Encrypt Lua                          |
+  |   [5] LuaJIT Bytecode Editor               |
+  |   [6] Show Session                         |
+  |   [7] Clear Screen                         |
+  |   [8] Logout                               |
+  |   [9] Exit                                 |
+  |                                            |
+  +--------------------------------------------+
+"""
+
+
+def ask(prompt, default=None):
+    val = input("  [>] " + prompt + ": ").strip()
+    if not val and default is not None:
+        return default
+    return val
+
+
+def do_unpack():
+    src = ask("PAK file path")
+    if not os.path.isfile(src):
+        print("  [!] File not found.")
+        return
+    dst = ask("Output folder", "unpacked")
+    try:
+        unpack_pak(src, dst)
+    except Exception as e:
+        print("  [!] Error: " + str(e))
+
+
+def do_repak():
+    src = ask("Folder to pack")
+    if not os.path.isdir(src):
+        print("  [!] Folder not found.")
+        return
+    dst = ask("Output PAK file", "output.pak")
+    comp = ask("Compress? (y/n)", "n").lower() == "y"
+    try:
+        repak_folder(src, dst, comp)
+    except Exception as e:
+        print("  [!] Error: " + str(e))
+
+
+def do_decrypt():
+    src = ask("Encrypted Lua file path")
+    if not os.path.isfile(src):
+        print("  [!] File not found.")
+        return
+    dst = ask("Output .lua file", "decrypted.lua")
+    method = ask("Method [xxtea/xor/none]", "xxtea")
+    key = ask("Key", "NAK2026VIP")
+    try:
+        decrypt_file(src, dst, method=method, key=key)
+    except Exception as e:
+        print("  [!] Error: " + str(e))
+
+
+def do_encrypt():
+    src = ask("Lua file path")
+    if not os.path.isfile(src):
+        print("  [!] File not found.")
+        return
+    dst = ask("Output encrypted file", "encrypted.lua")
+    method = ask("Method [xxtea/xor/none]", "xxtea")
+    key = ask("Key", "NAK2026VIP")
+    try:
+        encrypt_file(src, dst, method=method, key=key)
+    except Exception as e:
+        print("  [!] Error: " + str(e))
+
+
+def menu():
+    while True:
+        print(MENU)
+        choice = input("  [>] Select: ").strip()
+
+        if choice == "1":
+            do_unpack()
+        elif choice == "2":
+            do_repak()
+        elif choice == "3":
+            do_decrypt()
+        elif choice == "4":
+            do_encrypt()
+        elif choice == "5":
+            editor_menu()
+        elif choice == "6":
+            s = load_session()
+            print("")
+            print("  [*] Session: " + str(s))
+            print("")
+        elif choice == "7":
+            clear_screen()
+            show_banner()
+        elif choice == "8":
+            if os.path.isfile(CACHE_FILE):
+                os.remove(CACHE_FILE)
+            clear_screen()
+            print("  [*] Logged out.")
+            sys.exit(0)
+        elif choice == "9":
+            clear_screen()
+            print("  [*] Goodbye. NAK NEVER DIE.")
+            sys.exit(0)
+        else:
+            print("  [!] Invalid choice.")
+
+
+def main():
+    clear_screen()
+    show_banner()
+    if not check_login():
+        sys.exit(1)
+    clear_screen()
+    show_banner()
+    menu()
+
+
+if __name__ == "__main__":
+    main()
